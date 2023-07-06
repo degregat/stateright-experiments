@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use choice::{choice, Choice};
-use stateright::actor::{Actor, ActorModel, ActorModelAction, Id, Out};
+use stateright::actor::{Actor, ActorModel, ActorModelAction, Envelope, Id, Out};
 use stateright::{Checker, Expectation, Model};
 
 use std::fmt::Debug;
@@ -20,7 +20,7 @@ fn main() {
 pub fn check_counter_supervisor_by_hand() {
     println!("Example: Advance Choice Actor State by Hand");
 
-    let checker = ActorModel::<choice![SupervisorMachine, CounterMachine], (), u8>::new((), 0)
+    let model = ActorModel::<choice![SupervisorMachine, CounterMachine], (), u8>::new((), 0)
         .actor(Choice::new(SupervisorMachine {
             initial_state: SupervisorState {
                 addr: 0.into(),
@@ -38,27 +38,54 @@ pub fn check_counter_supervisor_by_hand() {
             })
             .or(),
         )
-        .property(Expectation::Sometimes, "always_true", |_, _state| true)
-        .checker()
-        .spawn_bfs()
-        .join();
-    //.serve("0:3000");
+        .property(Expectation::Sometimes, "always_true", |_, _state| true);
 
-    println!("{:?}", checker.discoveries());
+    println!("model init done");
 
-    println!("checker init done");
+    println!("Initial state: {:?}", &model.init_states());
 
-    println!("advance checker state: start");
+    println!("model add state");
 
-    checker.model().next_state(
-        &checker.model().init_states()[0],
+    let state1 = model.next_state(
+        &model.init_states()[0],
         ActorModelAction::Deliver {
             src: Id::from(0),
             dst: Id::from(1),
-            msg: PolyMsg::SupervisorIncrementRequest(1),
+            msg: PolyMsg::SupervisorIncrementRequest(3),
         },
     );
-    println!("advance checker state: done");
+    println!("Count up: {:?}", state1.clone().unwrap());
+    // CounterState::state.counter == 3
+
+    let state2 = model.next_state(
+        &state1.clone().unwrap(),
+        ActorModelAction::Deliver {
+            src: Id::from(0),
+            dst: Id::from(1),
+            msg: PolyMsg::SupervisorReportRequest(),
+        },
+    );
+    println!("Request state: {:?}", &state2);
+
+    let state3 = {
+        let e: Vec<Envelope<&PolyMsg>> = state2.as_ref().unwrap().network.iter_all().collect();
+
+        model.next_state(
+            &state2.as_ref().unwrap(),
+            ActorModelAction::Deliver {
+                src: e[0].src,
+                dst: e[0].dst,
+                msg: e[0].msg.clone(),
+            },
+        ) // Takes the first msg but does not remove it.
+    };
+    println!("Check supervisor: {:?}", state3);
+    // SupervisorState::state.success == true
+
+    model.checker().spawn_bfs().join();
+    //model.checker().serve("0:3000");
+
+    println!("advance state by hand: done");
 }
 
 pub fn check_counter_supervisor_by_discovery() {
@@ -99,7 +126,7 @@ pub fn check_counter_supervisor_by_discovery() {
             ActorModelAction::Deliver {
                 src: Id::from(0),
                 dst: Id::from(1),
-                msg: PolyMsg::SupervisorIncrementRequest(1),
+                msg: PolyMsg::SupervisorIncrementRequest(3),
             },
         ],
     );
@@ -268,7 +295,7 @@ impl MealyMachine for SupervisorMachine {
         println!("SupervisorMachine response.");
         match _msg {
             Self::InputMsgs::CounterReplyCount(n) => {
-                if n > _state.threshold {
+                if n >= _state.threshold {
                     (
                         SupervisorState {
                             success: true,
