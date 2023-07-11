@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use choice::{choice, Choice};
-use stateright::actor::{Actor, ActorModel, ActorModelAction, Envelope, Id, Out};
+use stateright::actor::{model_timeout, Actor, ActorModel, ActorModelAction, Envelope, Id, Out};
 use stateright::{Checker, Expectation, Model};
 
 use std::fmt::Debug;
@@ -12,114 +12,60 @@ use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 
+// TODO:
+// - Add more explanations in comments.
+// - Clean up code
+// - Define property for success on Supervisor or InputActor
+// - Fix on_msg of Supervisor so it reacts to InputActor
+
 fn main() {
-    check_counter_supervisor_by_hand();
     check_counter_supervisor_by_discovery();
-}
-
-pub fn check_counter_supervisor_by_hand() {
-    println!("Example: Advance Choice Actor State by Hand");
-
-    let model = ActorModel::<choice![SupervisorMachine, CounterMachine], (), u8>::new((), 0)
-        .actor(Choice::new(SupervisorMachine {
-            initial_state: SupervisorState {
-                addr: 0.into(),
-                threshold: 3,
-                counter_addr: 1.into(),
-                success: false,
-            },
-        }))
-        .actor(
-            Choice::new(CounterMachine {
-                initial_state: CounterState {
-                    addr: 1.into(),
-                    counter: 0,
-                },
-            })
-            .or(),
-        )
-        .property(Expectation::Sometimes, "always_true", |_, _state| true);
-
-    println!("model init done");
-
-    println!("Initial state: {:?}", &model.init_states());
-
-    println!("model add state");
-
-    let state1 = model.next_state(
-        &model.init_states()[0],
-        ActorModelAction::Deliver {
-            src: Id::from(0),
-            dst: Id::from(1),
-            msg: PolyMsg::SupervisorIncrementRequest(3),
-        },
-    );
-    println!("Count up: {:?}", state1.clone().unwrap());
-    // CounterState::state.counter == 3
-
-    let state2 = model.next_state(
-        &state1.clone().unwrap(),
-        ActorModelAction::Deliver {
-            src: Id::from(0),
-            dst: Id::from(1),
-            msg: PolyMsg::SupervisorReportRequest(),
-        },
-    );
-    println!("Request state: {:?}", &state2);
-
-    let state3 = {
-        let e: Vec<Envelope<&PolyMsg>> = state2.as_ref().unwrap().network.iter_all().collect();
-
-        model.next_state(
-            &state2.as_ref().unwrap(),
-            ActorModelAction::Deliver {
-                src: e[0].src,
-                dst: e[0].dst,
-                msg: e[0].msg.clone(),
-            },
-        ) // Takes the first msg but does not remove it.
-    };
-    println!("Check supervisor: {:?}", state3);
-    // SupervisorState::state.success == true
-
-    model.checker().spawn_bfs().join();
-    //model.checker().serve("0:3000");
-
-    println!("advance state by hand: done");
 }
 
 pub fn check_counter_supervisor_by_discovery() {
     println!("Example: Assert Discovery");
-    let checker = ActorModel::<choice![SupervisorMachine, CounterMachine], (), u8>::new((), 0)
-        .actor(Choice::new(SupervisorMachine {
-            initial_state: SupervisorState {
-                addr: 0.into(),
-                threshold: 3,
-                counter_addr: 1.into(),
-                success: false,
+    let checker = ActorModel::<
+        choice![SupervisorMachine, CounterMachine, ExternalInputActor],
+        (),
+        u8,
+    >::new((), 0)
+    .actor(Choice::new(SupervisorMachine {
+        initial_state: SupervisorState {
+            addr: 0.into(),
+            threshold: 3,
+            counter_addr: 1.into(),
+            success: false,
+        },
+    }))
+    .actor(
+        Choice::new(CounterMachine {
+            initial_state: CounterState {
+                addr: 1.into(),
+                counter: 0,
             },
-        }))
-        .actor(
-            Choice::new(CounterMachine {
-                initial_state: CounterState {
-                    addr: 1.into(),
-                    counter: 0,
-                },
-            })
-            .or(),
-        )
-        .property(Expectation::Sometimes, "always_true", |_, _state| true)
-        .checker()
-        .spawn_bfs()
-        .join();
-    //.serve("0:3000");
+        })
+        .or(),
+    )
+    .actor(
+        Choice::new(ExternalInputActor {
+            threshold: 3,
+            supervisor_addr: 0.into(),
+        })
+        .or()
+        .or(),
+    )
+    .property(Expectation::Eventually, "always_true", |_, _state| true)
+    .checker()
+    //.spawn_bfs()
+    //.join();
+    .serve("0:3000");
 
-    println!("{:?}", checker.discoveries());
+    //println!("{:?}", checker.discoveries());
 
     println!("checker init done");
 
     println!("checker assert discovery");
-    checker.assert_discovery(
+    /* checker.assert_discovery(
         "always_true",
         vec![
             // Request to increment the counter state of Actor 1 by 3
@@ -129,7 +75,7 @@ pub fn check_counter_supervisor_by_discovery() {
                 msg: PolyMsg::SupervisorIncrementRequest(3),
             },
         ],
-    );
+    ); */
 }
 
 // This trait is used to approximate Mealy Machines, to enable better reasoning about composition, independent of host frameworks.
@@ -167,7 +113,7 @@ pub struct BaseActor<T> {
     pub initial_state: T, //T needs to be a Mealy Machine State Type
 }
 
-pub type CounterSize = i32;
+pub type CounterSize = u32;
 
 pub type CounterMachine = BaseActor<CounterState>;
 
@@ -224,8 +170,9 @@ impl MealyMachine for CounterMachine {
 impl Actor for CounterMachine {
     type Msg = PolyMsg;
     type State = CounterState;
-    type Timer = ();
+    type Timer = InputTimer;
 
+    // TODO: Use placeholder address for initial_state struct and set to Id from on_start here
     fn on_start(&self, _id: Id, _o: &mut Out<Self>) -> Self::State {
         println!("CounterActor initializing.");
         CounterMachine::initialize(Some(self.initial_state))
@@ -316,7 +263,7 @@ impl MealyMachine for SupervisorMachine {
 impl Actor for SupervisorMachine {
     type Msg = PolyMsg;
     type State = SupervisorState;
-    type Timer = ();
+    type Timer = InputTimer;
 
     fn on_start(&self, _id: Id, _o: &mut Out<Self>) -> Self::State {
         println!("SupervisorMachine initializing.");
@@ -342,5 +289,78 @@ impl Actor for SupervisorMachine {
             o.send(addr, msg)
         }
         println!("SupervisorMachine response done.");
+    }
+}
+
+// Needs timer support
+pub struct ExternalInputActor {
+    pub threshold: CounterSize,
+    pub supervisor_addr: Id,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InputState {
+    pub cycles: u32,
+    pub done: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum InputTimer {
+    RequestIncrement,
+    RequestSuccess,
+}
+
+impl Actor for ExternalInputActor {
+    type Msg = PolyMsg;
+    type State = InputState;
+    type Timer = InputTimer;
+
+    fn on_start(&self, _id: Id, o: &mut Out<Self>) -> Self::State {
+        // Set a timeout to trigger sending increment request.
+        o.set_timer(InputTimer::RequestIncrement, model_timeout());
+        InputState {
+            cycles: 0,
+            done: false,
+        }
+    }
+
+    fn on_msg(
+        &self,
+        _id: Id,
+        state: &mut Cow<Self::State>,
+        _src: Id,
+        msg: Self::Msg,
+        _o: &mut Out<Self>,
+    ) {
+        match msg {
+            PolyMsg::CounterReplyCount(n) => {
+                if n >= self.threshold {
+                    state.to_mut().done = true;
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn on_timeout(
+        &self,
+        _id: Id,
+        state: &mut Cow<Self::State>,
+        timer: &Self::Timer,
+        o: &mut Out<Self>,
+    ) {
+        // We use the reuse the message types of SupervisorMachine here to simulate a user triggering Supervisor behavior.
+        match timer {
+            InputTimer::RequestIncrement => {
+                // Set timout for requesting success status s.t. it happens after incrementing.
+                o.set_timer(InputTimer::RequestSuccess, model_timeout());
+                o.send(self.supervisor_addr, PolyMsg::SupervisorIncrementRequest(3));
+                state.to_mut().cycles += 1; // Increment InputCycles
+            }
+            InputTimer::RequestSuccess => {
+                o.send(self.supervisor_addr, PolyMsg::SupervisorReportRequest());
+                state.to_mut().cycles += 1;
+            }
+        }
     }
 }
