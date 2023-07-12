@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use choice::{choice, Choice};
-use stateright::actor::{model_timeout, Actor, ActorModel, ActorModelAction, Envelope, Id, Out};
+use stateright::actor::{model_timeout, Actor, ActorModel, ActorModelAction, Id, Out};
 use stateright::{Checker, Expectation, Model};
 
 use std::fmt::Debug;
@@ -12,18 +12,29 @@ use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 
+use std::sync::Arc;
+
 // TODO:
 // - Add more explanations in comments.
 // - Clean up code
-// - Define property for success on Supervisor or InputActor
-// - Fix on_msg of Supervisor so it reacts to InputActor
+
+// This example contains valid Action Paths, but it is very much not constrained to only those.
 
 fn main() {
     check_counter_supervisor_by_discovery();
 }
 
+fn state_filter_success(s: &Arc<choice![SupervisorState, CounterState, InputState]>) -> bool {
+    match s.as_ref() {
+        choice!(0 -> v) => { if v.success == true { println!("{:?}", v.success)}; v.success == true}, // SupervisorState
+        choice!(1 -> _v) => false,            // CounterState
+        choice!(2 -> _v) => false,            // InputState
+        choice!(3 -> !) => false,             //
+    }
+}
+
 pub fn check_counter_supervisor_by_discovery() {
-    println!("Example: Assert Discovery");
+    //println!("Example: Assert Discovery");
     let checker = ActorModel::<
         choice![SupervisorMachine, CounterMachine, ExternalInputActor],
         (),
@@ -54,28 +65,31 @@ pub fn check_counter_supervisor_by_discovery() {
         .or()
         .or(),
     )
-    .property(Expectation::Eventually, "always_true", |_, _state| true)
+    .property(Expectation::Eventually, "success", |_, state| {
+        state.actor_states.iter().any(|s| state_filter_success(s))
+    })
     .checker()
-    //.spawn_bfs()
+    //.spawn_dfs()
     //.join();
     .serve("0:3000");
 
     //println!("{:?}", checker.discoveries());
 
-    println!("checker init done");
+    //println!("checker init done");
 
-    println!("checker assert discovery");
-    /* checker.assert_discovery(
-        "always_true",
+    //println!("checker assert discovery");
+    /*checker.assert_discovery(
+        "success",
         vec![
             // Request to increment the counter state of Actor 1 by 3
             ActorModelAction::Deliver {
-                src: Id::from(0),
-                dst: Id::from(1),
+                src: Id::from(2),
+                dst: Id::from(0),
                 msg: PolyMsg::SupervisorIncrementRequest(3),
             },
         ],
     ); */
+    checker.assert_properties();
 }
 
 // This trait is used to approximate Mealy Machines, to enable better reasoning about composition, independent of host frameworks.
@@ -146,7 +160,7 @@ impl MealyMachine for CounterMachine {
         _src: Address,
         _msg: Self::InputMsgs,
     ) -> (Self::MealyState, Vec<(Address, Self::OutputMsgs)>) {
-        println!("CounterMachine response.");
+        //println!("CounterMachine response.");
 
         match _msg {
             Self::InputMsgs::SupervisorIncrementRequest(n) => (
@@ -172,9 +186,9 @@ impl Actor for CounterMachine {
     type State = CounterState;
     type Timer = InputTimer;
 
-    // TODO: Use placeholder address for initial_state struct and set to Id from on_start here
+    // TODO: Use initial_state only to set configuration parameters. on_start should set addresses, initialize should set default values for expected behavior.
     fn on_start(&self, _id: Id, _o: &mut Out<Self>) -> Self::State {
-        println!("CounterActor initializing.");
+        //println!("CounterActor initializing.");
         CounterMachine::initialize(Some(self.initial_state))
     }
 
@@ -186,7 +200,7 @@ impl Actor for CounterMachine {
         msg: Self::Msg,
         o: &mut Out<Self>,
     ) {
-        println!("CounterActor on_msg.");
+        //println!("CounterActor on_msg.");
         let (new_state, output_msgs) =
             CounterMachine::respond_to_msg(id, state.as_ref().clone(), src, msg);
 
@@ -195,7 +209,7 @@ impl Actor for CounterMachine {
         for (addr, msg) in output_msgs {
             o.send(addr, msg)
         }
-        println!("CounterActor on_msg done.");
+        //println!("CounterActor on_msg done.");
     }
 }
 
@@ -239,7 +253,7 @@ impl MealyMachine for SupervisorMachine {
         _src: Address,
         _msg: Self::InputMsgs,
     ) -> (Self::MealyState, Vec<(Address, Self::OutputMsgs)>) {
-        println!("SupervisorMachine response.");
+        //println!("SupervisorMachine response.");
         match _msg {
             Self::InputMsgs::CounterReplyCount(n) => {
                 if n >= _state.threshold {
@@ -266,7 +280,7 @@ impl Actor for SupervisorMachine {
     type Timer = InputTimer;
 
     fn on_start(&self, _id: Id, _o: &mut Out<Self>) -> Self::State {
-        println!("SupervisorMachine initializing.");
+        //println!("SupervisorMachine initializing.");
         SupervisorMachine::initialize(Some(self.initial_state))
     }
 
@@ -278,17 +292,23 @@ impl Actor for SupervisorMachine {
         msg: Self::Msg,
         o: &mut Out<Self>,
     ) {
-        println!("SupervisorMachine responding to msg.");
+        //println!("SupervisorMachine responding to msg.");
+        
+        // InputActor triggers message forwarding.
+        if src == 2.into() { // TODO: Take InputActor address as an argument
+            o.send(state.counter_addr, msg)
+        } else {
+            let (new_state, output_msgs) =
+                SupervisorMachine::respond_to_msg(id, state.as_ref().clone(), src, msg);
 
-        let (new_state, output_msgs) =
-            SupervisorMachine::respond_to_msg(id, state.as_ref().clone(), src, msg);
+            *state.to_mut() = new_state;
 
-        *state.to_mut() = new_state;
-
-        for (addr, msg) in output_msgs {
-            o.send(addr, msg)
+            for (addr, msg) in output_msgs {
+                o.send(addr, msg)
+            }
         }
-        println!("SupervisorMachine response done.");
+
+        //println!("SupervisorMachine response done.");
     }
 }
 
